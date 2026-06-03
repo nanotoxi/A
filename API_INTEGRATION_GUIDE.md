@@ -479,31 +479,6 @@ Future<List<dynamic>> getAlerts(int repId) async {
 
 ---
 
-### WhatsApp Bot (Node.js + Twilio)
-
-```javascript
-const axios = require('axios');
-
-// In your Twilio webhook handler:
-app.post('/whatsapp-webhook', async (req, res) => {
-  const incomingMessage = req.body.Body;        // what the rep typed
-  const fromNumber = req.body.From;             // WhatsApp number
-
-  // Map phone number to rep_id (your lookup logic here)
-  const repId = await getRepIdByPhone(fromNumber);
-
-  // Call SaneForce AI
-  const { data } = await axios.post(
-    'https://a-production-19cf.up.railway.app/chat',
-    { question: incomingMessage, rep_id: repId }
-  );
-
-  // Reply via Twilio
-  const twiml = `<Response><Message>${data.answer}</Message></Response>`;
-  res.type('text/xml').send(twiml);
-});
-```
-
 ---
 
 ## Integration Patterns
