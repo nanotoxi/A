@@ -477,7 +477,71 @@ Future<List<dynamic>> getAlerts(int repId) async {
 }
 ```
 
----
+### WhatsApp Bot (Node.js + Gupshup)
+
+[Gupshup](https://www.gupshup.io) is the most widely used WhatsApp Business API provider in India. Sign up at gupshup.io, create a WhatsApp app, and get your API key and source phone number.
+
+```javascript
+const express = require('express');
+const axios = require('axios');
+const app = express();
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+
+const GUPSHUP_API_KEY = process.env.GUPSHUP_API_KEY;
+const GUPSHUP_SOURCE = process.env.GUPSHUP_SOURCE_NUMBER; // your Gupshup WhatsApp number
+
+// Gupshup sends incoming messages to this webhook
+app.post('/whatsapp-webhook', async (req, res) => {
+  const payload = req.body;
+
+  // Gupshup wraps the message in a 'payload' field
+  const messageData = JSON.parse(payload.payload || '{}');
+  const incomingMessage = messageData.payload?.text;
+  const senderPhone = payload.sender?.phone;
+
+  if (!incomingMessage || !senderPhone) {
+    return res.sendStatus(200);
+  }
+
+  // Map phone number to rep_id (your lookup logic here)
+  const repId = await getRepIdByPhone(senderPhone);
+  if (!repId) {
+    return res.sendStatus(200);
+  }
+
+  // Call SaneForce AI
+  const { data } = await axios.post(
+    'https://a-production-19cf.up.railway.app/chat',
+    { question: incomingMessage, rep_id: repId },
+    { timeout: 15000 }
+  );
+
+  // Send reply via Gupshup
+  await axios.post(
+    'https://api.gupshup.io/sm/api/v1/msg',
+    new URLSearchParams({
+      channel: 'whatsapp',
+      source: GUPSHUP_SOURCE,
+      destination: senderPhone,
+      message: JSON.stringify({ type: 'text', text: data.answer }),
+      'src.name': 'SaneForceAI'
+    }),
+    { headers: { apikey: GUPSHUP_API_KEY } }
+  );
+
+  res.sendStatus(200);
+});
+
+app.listen(3000);
+```
+
+**Setup steps:**
+1. Register at [gupshup.io](https://www.gupshup.io) and create a WhatsApp app
+2. Set your webhook URL to `https://your-server.com/whatsapp-webhook`
+3. Add `GUPSHUP_API_KEY` and `GUPSHUP_SOURCE_NUMBER` to your environment variables
+
+**Alternative Indian providers:** [Interakt](https://interakt.ai), [MSG91](https://msg91.com/whatsapp), [AiSensy](https://aisensy.com) — all support the same WhatsApp Business API pattern, only the outbound HTTP call differs.
 
 ---
 
