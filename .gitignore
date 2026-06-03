@@ -1,0 +1,6 @@
+.env
+saneforce.db
+__pycache__/
+*.pyc
+.venv/
+venv/
