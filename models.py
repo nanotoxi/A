@@ -1,10 +1,20 @@
-from pydantic import BaseModel
-from typing import Optional, List, Any
+from pydantic import BaseModel, Field, field_validator
+from typing import Optional, List
+import re
 
 
 class ChatRequest(BaseModel):
-    question: str
-    rep_id: int
+    question: str = Field(..., min_length=3, max_length=500)
+    rep_id: int = Field(..., ge=1)
+
+    @field_validator("question")
+    @classmethod
+    def sanitize_question(cls, v: str) -> str:
+        # Strip SQL injection attempts and control characters
+        cleaned = re.sub(r"[;\\\x00-\x1f]", "", v).strip()
+        if not cleaned:
+            raise ValueError("Question must contain readable text")
+        return cleaned
 
 
 class RepContext(BaseModel):

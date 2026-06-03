@@ -4,8 +4,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from models import (
     ChatRequest, ChatResponse, RepContext,
@@ -18,18 +22,36 @@ from models import (
 from database import get_connection, get_rep, is_db_ready
 import ai_engine
 
+# ── Rate limiter ──────────────────────────────────────────────────────────────
+limiter = Limiter(key_func=get_remote_address)
+
 app = FastAPI(
     title="SaneForce AI Sales Assistant",
     description="AI-powered sales intelligence API for SaneForce field sales teams.",
     version="1.0.0",
 )
 
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# ── CORS ──────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"],   # Tighten to specific domains in production
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Authorization"],
 )
+
+# ── Security headers middleware ───────────────────────────────────────────────
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def _require_rep(rep_id: int):
@@ -40,11 +62,15 @@ def _require_rep(rep_id: int):
 
 
 # ── /chat ──────────────────────────────────────────────────────────────────────
+# Stricter limit: 10 AI calls/minute per IP (each call hits Groq)
 
 @app.post("/chat", response_model=ChatResponse, tags=["AI"])
-def chat(body: ChatRequest):
+@limiter.limit("10/minute")
+def chat(request: Request, body: ChatRequest):
     """Ask the AI any question about your stores, products, visits, or sales strategy."""
     result = ai_engine.chat(body.question, body.rep_id)
+    if not result["rep"]:
+        raise HTTPException(status_code=404, detail="Rep not found")
     rep = result["rep"]
     return ChatResponse(
         answer=result["answer"],
@@ -61,7 +87,8 @@ def chat(body: ChatRequest):
 # ── /stores/low-performing ────────────────────────────────────────────────────
 
 @app.get("/stores/low-performing", response_model=LowPerformingResponse, tags=["Stores"])
-def low_performing_stores(rep_id: int = Query(..., description="Your rep ID")):
+@limiter.limit("30/minute")
+def low_performing_stores(request: Request, rep_id: int = Query(..., ge=1, description="Your rep ID")):
     """Bottom 5 stores by revenue this month for your territory. Pure SQL — no AI."""
     rep = _require_rep(rep_id)
     start_of_month = date.today().replace(day=1).isoformat()
@@ -108,7 +135,8 @@ def low_performing_stores(rep_id: int = Query(..., description="Your rep ID")):
 # ── /stores/{store_id}/products ───────────────────────────────────────────────
 
 @app.get("/stores/{store_id}/products", response_model=StoreProductsResponse, tags=["Stores"])
-def store_products(store_id: int, rep_id: int = Query(..., description="Your rep ID")):
+@limiter.limit("30/minute")
+def store_products(request: Request, store_id: int, rep_id: int = Query(..., ge=1, description="Your rep ID")):
     """Product sell-through breakdown for a specific store this month."""
     _require_rep(rep_id)
     start_of_month = date.today().replace(day=1).isoformat()
@@ -160,7 +188,8 @@ def store_products(store_id: int, rep_id: int = Query(..., description="Your rep
 # ── /recommendations ──────────────────────────────────────────────────────────
 
 @app.get("/recommendations", response_model=RecommendationsResponse, tags=["AI"])
-def recommendations(rep_id: int = Query(..., description="Your rep ID")):
+@limiter.limit("20/minute")
+def recommendations(request: Request, rep_id: int = Query(..., ge=1, description="Your rep ID")):
     """AI-generated visit priority list and product push suggestions."""
     rep = _require_rep(rep_id)
     today = date.today()
@@ -169,7 +198,6 @@ def recommendations(rep_id: int = Query(..., description="Your rep ID")):
     start_of_month = today.replace(day=1).isoformat()
 
     with get_connection() as conn:
-        # Stores not visited in 7+ days that had a sales drop
         visit_candidates = conn.execute(
             """
             SELECT
@@ -189,7 +217,6 @@ def recommendations(rep_id: int = Query(..., description="Your rep ID")):
             (week_ago, two_weeks_ago, week_ago, rep["rep_id"], week_ago),
         ).fetchall()
 
-        # Products with zero sales this month at a store where they sell at others
         push_candidates = conn.execute(
             """
             SELECT DISTINCT
@@ -253,7 +280,8 @@ def recommendations(rep_id: int = Query(..., description="Your rep ID")):
 # ── /alerts ───────────────────────────────────────────────────────────────────
 
 @app.get("/alerts", response_model=AlertsResponse, tags=["Alerts"])
-def alerts(rep_id: int = Query(..., description="Your rep ID")):
+@limiter.limit("30/minute")
+def alerts(request: Request, rep_id: int = Query(..., ge=1, description="Your rep ID")):
     """Proactive alerts: unvisited stores, sales drops, stalled products."""
     rep = _require_rep(rep_id)
     today = date.today()
@@ -261,7 +289,6 @@ def alerts(rep_id: int = Query(..., description="Your rep ID")):
     two_weeks_ago = (today - timedelta(days=14)).isoformat()
 
     with get_connection() as conn:
-        # Stores not visited in 7+ days
         unvisited = conn.execute(
             """
             SELECT store_name, location, last_visit_date
@@ -273,7 +300,6 @@ def alerts(rep_id: int = Query(..., description="Your rep ID")):
             (rep["rep_id"], week_ago),
         ).fetchall()
 
-        # Stores with 20%+ revenue drop week-on-week
         drops = conn.execute(
             """
             SELECT
@@ -292,7 +318,6 @@ def alerts(rep_id: int = Query(..., description="Your rep ID")):
         ).fetchall()
 
     result = []
-
     for r in unvisited:
         lv = r["last_visit_date"]
         days = (today - date.fromisoformat(lv)).days if lv else "unknown number of"
